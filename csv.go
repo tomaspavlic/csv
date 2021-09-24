@@ -6,7 +6,6 @@ import (
 	"io"
 	"reflect"
 	"strconv"
-	"strings"
 )
 
 type mapping []*field
@@ -20,13 +19,53 @@ type Reader struct {
 	reader *bufio.Reader
 }
 
-func (r *Reader) readLine() ([]string, error) {
-	l, _, err := r.reader.ReadLine()
+func trimQuatations(str []byte) string {
+	if str[0] == '"' && str[len(str)-1] == '"' {
+		str = str[1 : len(str)-1]
+	}
+
+	return string(str)
+}
+
+func (r *Reader) parseLine() ([]string, error) {
+	lineBytes, _, err := r.reader.ReadLine()
 	if err != nil {
 		return nil, err
 	}
-	cols := strings.Split(string(l), ",")
-	return cols, nil
+
+	var result []string
+	var i, pos int
+	var inQuatations bool
+
+	for ; i < len(lineBytes); i++ {
+
+		if lineBytes[i] == '"' {
+			if !inQuatations {
+				inQuatations = true
+			} else {
+				// escaping - if the next rune is also quotation remove current character
+				if i+1 != len(lineBytes) && lineBytes[i+1] == '"' {
+					lineBytes = append(lineBytes[:i], lineBytes[i+1:]...)
+					continue
+				}
+				inQuatations = false
+			}
+		}
+
+		if lineBytes[i] == ',' && !inQuatations {
+			v := trimQuatations(lineBytes[pos:i])
+			result = append(result, v)
+			pos = i + 1
+		}
+	}
+
+	// handle the last string at the end
+	if i > pos {
+		v := trimQuatations(lineBytes[pos:i])
+		result = append(result, v)
+	}
+
+	return result, nil
 }
 
 func mapColumns(t reflect.Type, columns []string) mapping {
@@ -85,14 +124,22 @@ func (r *Reader) ReadAll(i interface{}) error {
 	}
 
 	itemType := t.Elem().Elem()
-	header, _ := r.readLine()
+	header, _ := r.parseLine()
 	mapping := mapColumns(itemType, header)
 	slice := reflect.ValueOf(i).Elem()
 
 	for lineNumber := 1; ; lineNumber++ {
-		cols, err := r.readLine()
+		cols, err := r.parseLine()
 		if err == io.EOF {
 			return nil
+		}
+
+		if err != nil {
+			return err
+		}
+
+		if len(cols) != len(mapping) {
+			return fmt.Errorf("wrong number of columns on line %d", lineNumber)
 		}
 
 		item := reflect.New(itemType)
