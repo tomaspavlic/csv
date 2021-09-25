@@ -8,18 +8,36 @@ import (
 	"strconv"
 )
 
-type mapping []*field
+type mapping struct {
+	fieldIndex  int
+	columnIndex int
+}
 
 type field struct {
-	index int
-	kind  reflect.Kind
+	columnName string
+	fieldIndex int
+	kind       reflect.Kind
 }
 
 type Reader struct {
-	reader *bufio.Reader
+	reader    *bufio.Reader
+	mapping   []mapping
+	Delimiter byte
 }
 
-func trimQuatations(str []byte) string {
+const (
+	defaultDelimiter = ','
+	columnNameTag    = "columnName"
+)
+
+func NewReader(r io.Reader) *Reader {
+	br := bufio.NewReader(r)
+	return &Reader{
+		reader:    br,
+		Delimiter: defaultDelimiter}
+}
+
+func (r Reader) trim(str []byte) string {
 	if str[0] == '"' && str[len(str)-1] == '"' {
 		str = str[1 : len(str)-1]
 	}
@@ -27,7 +45,7 @@ func trimQuatations(str []byte) string {
 	return string(str)
 }
 
-func (r *Reader) parseLine() ([]string, error) {
+func (r Reader) parseLine() ([]string, error) {
 	lineBytes, _, err := r.reader.ReadLine()
 	if err != nil {
 		return nil, err
@@ -52,8 +70,8 @@ func (r *Reader) parseLine() ([]string, error) {
 			}
 		}
 
-		if lineBytes[i] == ',' && !inQuatations {
-			v := trimQuatations(lineBytes[pos:i])
+		if lineBytes[i] == r.Delimiter && !inQuatations {
+			v := r.trim(lineBytes[pos:i])
 			result = append(result, v)
 			pos = i + 1
 		}
@@ -61,45 +79,55 @@ func (r *Reader) parseLine() ([]string, error) {
 
 	// handle the last string at the end
 	if i > pos {
-		v := trimQuatations(lineBytes[pos:i])
+		v := r.trim(lineBytes[pos:i])
 		result = append(result, v)
 	}
 
 	return result, nil
 }
 
-func mapColumns(t reflect.Type, columns []string) mapping {
-	mapping := make(mapping, len(columns))
+func (r *Reader) mapFields(t reflect.Type) error {
+	columns, err := r.parseLine()
+	if err != nil {
+		return err
+	}
+	fields := r.getFields(t)
 
-	// struct fields
-	for colIndex, colName := range columns {
-		for fieldIndex := 0; fieldIndex < t.NumField(); fieldIndex++ {
-			fieldInfo := t.Field(fieldIndex)
-			columnNameTag := fieldInfo.Tag.Get("columnName")
+FieldsLoop:
+	for _, field := range fields {
 
-			// skip if field does not containg `columnName` tag
-			if columnNameTag == "" {
-				break
+		for colIndex, colName := range columns {
+			if field.columnName == colName {
+				r.mapping = append(r.mapping, mapping{field.fieldIndex, colIndex})
+				continue FieldsLoop
+			}
+		}
+
+		return fmt.Errorf("column %s was not found", field.columnName)
+	}
+
+	return nil
+}
+
+func (r Reader) getFields(t reflect.Type) (fields []field) {
+	for fieldIndex := 0; fieldIndex < t.NumField(); fieldIndex++ {
+		fieldInfo := t.Field(fieldIndex)
+
+		if fieldInfo.IsExported() {
+			columnName := fieldInfo.Tag.Get(columnNameTag)
+
+			if columnName == "" {
+				columnName = fieldInfo.Name
 			}
 
-			if fieldInfo.IsExported() {
-				if columnNameTag == colName {
-					mapping[colIndex] = &field{fieldIndex, fieldInfo.Type.Kind()}
-					break
-				}
-			}
+			fields = append(fields, field{columnName, fieldIndex, fieldInfo.Type.Kind()})
 		}
 	}
 
-	return mapping
+	return fields
 }
 
-func NewReader(r io.Reader) *Reader {
-	br := bufio.NewReader(r)
-	return &Reader{br}
-}
-
-func setFieldValue(value string, elemField reflect.Value, kind reflect.Kind) error {
+func (r Reader) setFieldValue(value string, elemField reflect.Value, kind reflect.Kind) error {
 	switch kind {
 	case reflect.String:
 		elemField.SetString(value)
@@ -124,10 +152,12 @@ func (r *Reader) ReadAll(i interface{}) error {
 	}
 
 	itemType := t.Elem().Elem()
-	header, _ := r.parseLine()
-	mapping := mapColumns(itemType, header)
-	slice := reflect.ValueOf(i).Elem()
+	err := r.mapFields(itemType)
+	if err != nil {
+		return err
+	}
 
+	slice := reflect.ValueOf(i).Elem()
 	for lineNumber := 1; ; lineNumber++ {
 		cols, err := r.parseLine()
 		if err == io.EOF {
@@ -138,21 +168,14 @@ func (r *Reader) ReadAll(i interface{}) error {
 			return err
 		}
 
-		if len(cols) != len(mapping) {
-			return fmt.Errorf("wrong number of columns on line %d", lineNumber)
-		}
-
 		item := reflect.New(itemType)
 
-		for i, value := range cols {
-			// fmt.Println(i, value, item, mapping)
-			field := mapping[i]
-			if field != nil {
-				elemField := item.Elem().Field(field.index)
-				err := setFieldValue(value, elemField, field.kind)
-				if err != nil {
-					return fmt.Errorf("line %d column %d: %s", lineNumber, i+1, err)
-				}
+		for i, m := range r.mapping {
+			elemField := item.Elem().Field(m.fieldIndex)
+			value := cols[m.columnIndex]
+			err := r.setFieldValue(value, elemField, elemField.Kind())
+			if err != nil {
+				return fmt.Errorf("line %d column %d: %s", lineNumber, i+1, err)
 			}
 		}
 
