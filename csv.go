@@ -6,38 +6,46 @@ import (
 	"io"
 	"reflect"
 	"strconv"
+	"strings"
+	"time"
 )
 
 type mapping struct {
-	fieldIndex  int
+	field       field
 	columnIndex int
 }
 
 type field struct {
 	columnName string
-	fieldIndex int
+	index      int
 	kind       reflect.Kind
 }
 
 type Reader struct {
-	reader    *bufio.Reader
-	mapping   []mapping
-	Delimiter byte
+	reader  *bufio.Reader
+	mapping []mapping
+
+	// Parsing options
+	Delimiter  byte
+	TimeLayout string
 }
 
 const (
-	defaultDelimiter = ','
-	columnNameTag    = "columnName"
+	defaultDelimiter  = ','
+	defaultTimeLayout = time.RFC3339
+	columnNameTag     = "columnName"
 )
 
 func NewReader(r io.Reader) *Reader {
 	br := bufio.NewReader(r)
 	return &Reader{
-		reader:    br,
-		Delimiter: defaultDelimiter}
+		reader:     br,
+		Delimiter:  defaultDelimiter,
+		TimeLayout: defaultTimeLayout}
 }
 
-func (r Reader) trim(str []byte) string {
+func (r Reader) trim(str string) string {
+	str = strings.Trim(str, string([]byte{'\t', ' '}))
 	if str[0] == '"' && str[len(str)-1] == '"' {
 		str = str[1 : len(str)-1]
 	}
@@ -71,7 +79,7 @@ func (r Reader) parseLine() ([]string, error) {
 		}
 
 		if lineBytes[i] == r.Delimiter && !inQuatations {
-			v := r.trim(lineBytes[pos:i])
+			v := r.trim(string(lineBytes[pos:i]))
 			result = append(result, v)
 			pos = i + 1
 		}
@@ -79,7 +87,7 @@ func (r Reader) parseLine() ([]string, error) {
 
 	// handle the last string at the end
 	if i > pos {
-		v := r.trim(lineBytes[pos:i])
+		v := r.trim(string(lineBytes[pos:i]))
 		result = append(result, v)
 	}
 
@@ -98,7 +106,7 @@ FieldsLoop:
 
 		for colIndex, colName := range columns {
 			if field.columnName == colName {
-				r.mapping = append(r.mapping, mapping{field.fieldIndex, colIndex})
+				r.mapping = append(r.mapping, mapping{field, colIndex})
 				continue FieldsLoop
 			}
 		}
@@ -131,14 +139,27 @@ func (r Reader) setFieldValue(value string, elemField reflect.Value, kind reflec
 	switch kind {
 	case reflect.String:
 		elemField.SetString(value)
-	case reflect.Int32:
-		valueInt, err := strconv.ParseInt(value, 0, 32)
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		valueInt, err := strconv.ParseInt(value, 0, 64)
 		if err != nil {
-			return fmt.Errorf("can not parse '%s' as int32", value)
+			return fmt.Errorf("can not parse '%s' as int", value)
 		}
 		elemField.SetInt(valueInt)
+	case reflect.Float32, reflect.Float64:
+		float, err := strconv.ParseFloat(value, 64)
+		if err != nil {
+			return fmt.Errorf("can not parse '%s' as float", value)
+		}
+		elemField.SetFloat(float)
+	case reflect.ValueOf(time.Time{}).Kind():
+		t, err := time.Parse(r.TimeLayout, value)
+		if err != nil {
+			return fmt.Errorf("can not parse '%s' as time.Time", value)
+		}
+
+		elemField.Set(reflect.ValueOf(t))
 	default:
-		return fmt.Errorf("unsupported type")
+		return fmt.Errorf("unsupported type %s", kind)
 	}
 
 	return nil
@@ -171,7 +192,7 @@ func (r *Reader) ReadAll(i interface{}) error {
 		item := reflect.New(itemType)
 
 		for i, m := range r.mapping {
-			elemField := item.Elem().Field(m.fieldIndex)
+			elemField := item.Elem().Field(m.field.index)
 			value := cols[m.columnIndex]
 			err := r.setFieldValue(value, elemField, elemField.Kind())
 			if err != nil {
