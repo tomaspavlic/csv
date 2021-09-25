@@ -33,7 +33,7 @@ type Reader struct {
 const (
 	defaultDelimiter  = ','
 	defaultTimeLayout = time.RFC3339
-	columnNameTag     = "columnName"
+	csvTag            = "csv"
 )
 
 func NewReader(r io.Reader) *Reader {
@@ -122,13 +122,13 @@ func (r Reader) getFields(t reflect.Type) (fields []field) {
 		fieldInfo := t.Field(fieldIndex)
 
 		if fieldInfo.IsExported() {
-			columnName := fieldInfo.Tag.Get(columnNameTag)
+			colName := fieldInfo.Tag.Get(csvTag)
 
-			if columnName == "" {
-				columnName = fieldInfo.Name
+			if colName == "" {
+				colName = fieldInfo.Name
 			}
 
-			fields = append(fields, field{columnName, fieldIndex, fieldInfo.Type.Kind()})
+			fields = append(fields, field{colName, fieldIndex, fieldInfo.Type.Kind()})
 		}
 	}
 
