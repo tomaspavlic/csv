@@ -34,11 +34,11 @@ Parses each line into a item of given slice
 ```go
 func main() {
 	response, _ := http.Get("https://people.sc.fsu.edu/~jburkardt/data/csv/taxables.csv")
-    // define a slice with a type
+	// define a slice with a type
 	var taxables []Taxable
-    // initiate the reader
+	// initiate the reader
 	r := csv.NewReader(response.Body)
-    // read all lines into the referenced slice 
+	// read all lines into the referenced slice 
 	err := r.ReadAll(&taxables)
 
 	if err != nil {
