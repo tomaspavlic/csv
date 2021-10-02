@@ -181,7 +181,7 @@ func (r *Reader) ReadAll(i interface{}) error {
 	slice := reflect.ValueOf(i).Elem()
 	for lineNumber := 1; ; lineNumber++ {
 		cols, err := r.parseLine()
-		if err == io.EOF {
+		if err == io.EOF || len(cols) == 0 {
 			return nil
 		}
 
